@@ -15,9 +15,9 @@ BotController::BotController(Game& game) : game(game), chat_queue(game.chat), en
 }
 
 void BotController::HandleEvent(const JoinGameEvent& event) {
-  Log(LogLevel::Debug, "Clearing bot behaviors from JoinGameEvent.");
-
-  behaviors.Clear();
+  // Don't clear behaviors here - ZoneController will set them up
+  // Log(LogLevel::Debug, "Clearing bot behaviors from JoinGameEvent.");
+  // behaviors.Clear();
 
   // Clear the pathfinder so it will rebuild on ship change.
   pathfinder = nullptr;
@@ -43,6 +43,7 @@ void BotController::HandleEvent(const PlayerEnterEvent& event) {
 }
 
 void BotController::HandleEvent(const MapLoadEvent& event) {
+  Log(LogLevel::Debug, "MapLoadEvent received, sending ?arena");
   // Send a request for the arena list so we can know the name of the current arena.
   game.chat.SendMessage(ChatType::Public, "?arena");
 }
