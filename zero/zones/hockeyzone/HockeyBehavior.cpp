@@ -148,7 +148,6 @@ struct FindOpenTeammateNode : public behavior::BehaviorNode {
   const char* enemy_goal_key;
 };
 
-// --- UPGRADED: The Dynamic Awareness Node ---
 struct HockeyAwarenessChaseNode : public behavior::BehaviorNode {
   HockeyAwarenessChaseNode(const char* puck_key) : puck_key(puck_key) {}
 
@@ -158,10 +157,13 @@ struct HockeyAwarenessChaseNode : public behavior::BehaviorNode {
     
     if (!self || !opt_puck) return behavior::ExecuteResult::Failure;
 
+    if (ctx.bot->bot_controller->input) {
+        ctx.bot->bot_controller->input->SetAction(InputAction::Bullet, false);
+    }
+
     Vector2f puck_pos = *opt_puck;
     Player* carrier = nullptr;
 
-    // 1. Check if anyone is holding the puck
     for (size_t i = 0; i < ctx.bot->game->player_manager.player_count; ++i) {
       Player* p = ctx.bot->game->player_manager.players + i;
       if (p->ship >= 8 || p->id == self->id) continue;
@@ -174,47 +176,62 @@ struct HockeyAwarenessChaseNode : public behavior::BehaviorNode {
 
     if (carrier) {
       if (carrier->frequency == self->frequency) {
-        // OFFENSE: Teammate has it! Execute "Weak-Side Winger" algorithm.
         Vector2f open_pos;
         open_pos.x = (self->frequency == 0) ? HockeyConfig::kRightShootX : HockeyConfig::kLeftShootX;
         
-        // Go to the opposite side of the ice from the carrier to open a cross-crease lane
         open_pos.y = (carrier->position.y > HockeyConfig::kCenterY) 
                      ? HockeyConfig::kCenterY - 15.0f 
                      : HockeyConfig::kCenterY + 15.0f;
             
-        // Are we in the sweet spot AND is the lane clear?
         if (self->position.Distance(open_pos) < 8.0f && IsLaneClear(*ctx.bot->game, carrier->position, self->position, self->frequency)) {
-            ctx.bot->bot_controller->steering.force = Vector2f(0, 0); // Stop
-            ctx.bot->bot_controller->steering.Face(*ctx.bot->game, puck_pos); // Look for the pass
+            ctx.bot->bot_controller->steering.force = Vector2f(0, 0); 
+            ctx.bot->bot_controller->steering.Face(*ctx.bot->game, puck_pos); 
         } else {
-            ctx.bot->bot_controller->steering.force = open_pos - self->position; // Keep skating to get open
+            ctx.bot->bot_controller->steering.force = open_pos - self->position; 
         }
         return behavior::ExecuteResult::Success;
         
       } else {
-        // DEFENSE: Enemy has it! The Enforcer Algorithm.
         Vector2f to_enemy = carrier->position - self->position;
         float dist_to_enemy = self->position.Distance(carrier->position);
         
-        ctx.bot->bot_controller->steering.force = to_enemy; // Relentless chase
+        ctx.bot->bot_controller->steering.force = to_enemy; 
         
-        // If we get within 2 tiles, aim dead center and fire bullets!
-        // If we get within 2 tiles, aim dead center to aggressively RAM the carrier!
         if (dist_to_enemy <= 2.0f) {
             ctx.bot->bot_controller->steering.Face(*ctx.bot->game, carrier->position);
+            
+            int cooldown = ctx.blackboard.ValueOr<int>("enforcer_cooldown", 0);
+            if (cooldown == 0) {
+                if (ctx.bot->bot_controller->input) {
+                    ctx.bot->bot_controller->input->SetAction(InputAction::Bullet, true);
+                }
+                ctx.blackboard.Set<int>("enforcer_cooldown", 1);
+            } else {
+                cooldown++;
+                if (cooldown > 25) cooldown = 0; 
+                ctx.blackboard.Set<int>("enforcer_cooldown", cooldown);
+            }
+        } else {
+            ctx.blackboard.Set<int>("enforcer_cooldown", 0);
         }
         
         return behavior::ExecuteResult::Success;
       }
     }
 
-    // NOBODY HAS IT: Loose puck chase
+    // UPGRADED: Loose puck chase (Anti-Orbiting Math)
     float dist = self->position.Distance(puck_pos);
     Vector2f to_puck = puck_pos - self->position;
+    float current_speed = self->velocity.Length();
     
     if (dist < 14.5f) {
-      ctx.bot->bot_controller->steering.force = Normalize(to_puck) * (dist / 14.5f); 
+      // We are in the lock-on zone. If going too fast, slam the brakes!
+      if (current_speed > 15.0f) {
+          ctx.bot->bot_controller->steering.force = -Normalize(self->velocity); 
+      } else {
+          // Normal speed? Aim straight for the puck. No more scaling force to zero!
+          ctx.bot->bot_controller->steering.force = to_puck;
+      }
     } else {
       ctx.bot->bot_controller->steering.force = to_puck;
     }
@@ -232,6 +249,10 @@ struct HockeyCarryPuckNode : public behavior::BehaviorNode {
     auto opt_target = ctx.blackboard.Value<Vector2f>(target_key);
     
     if (!self || !opt_target) return behavior::ExecuteResult::Failure;
+
+    if (ctx.bot->bot_controller->input) {
+        ctx.bot->bot_controller->input->SetAction(InputAction::Bullet, false);
+    }
 
     Vector2f target = *opt_target;
     float current_speed = self->velocity.Length();
@@ -309,6 +330,10 @@ struct HockeyAimAndShootNode : public behavior::BehaviorNode {
     auto self = ctx.bot->game->player_manager.GetSelf();
     if (!self) return behavior::ExecuteResult::Failure;
 
+    if (ctx.bot->bot_controller->input) {
+        ctx.bot->bot_controller->input->SetAction(InputAction::Bullet, false);
+    }
+
     auto opt_goal = ctx.blackboard.Value<Vector2f>(goal_key);
     if (!opt_goal) return behavior::ExecuteResult::Failure;
 
@@ -331,7 +356,8 @@ struct HockeyAimAndShootNode : public behavior::BehaviorNode {
     Log(LogLevel::Debug, "Aim: pos=(%.0f,%.0f) goal=(%.0f,%.0f) alignment=%.3f",
         my_pos.x, my_pos.y, goal.x, goal.y, alignment);
     
-    if (alignment > 0.97f) {
+    // UPGRADED: Tighter Sniper Alignment (from 0.97 to 0.99)
+    if (alignment > 0.99f) {
       if (std::strcmp(goal_key, "pass_target") == 0) {
           Log(LogLevel::Info, "SNIPING PASS TO TEAMMATE! alignment=%.3f", alignment);
       } else {
@@ -362,6 +388,7 @@ struct HockeyInShootingRangeNode : public behavior::BehaviorNode {
     auto opt_shoot_pos = ctx.blackboard.Value<Vector2f>(shoot_pos_key);
     if (!opt_shoot_pos) return behavior::ExecuteResult::Failure;
 
+    // We calculate distance to the target key dynamically
     float dist = self->position.Distance(*opt_shoot_pos);
     
     if (dist <= range) {
@@ -384,47 +411,59 @@ std::unique_ptr<behavior::BehaviorNode> HockeyBehavior::CreateTree(behavior::Exe
   // clang-format off
   builder
     .Selector()
+
+        // Only request a ship if the bot is spectating.
+        // This respects zero.cfg RequestShip and !setship commands.
         .Sequence()
             .Child<ExecuteNode>([](ExecuteContext& ctx) {
-              auto self = ctx.bot->game->player_manager.GetSelf();
-              if (!self) return ExecuteResult::Failure;
-              if (self->ship >= 8) return ExecuteResult::Success;
-              return ExecuteResult::Failure;
+                auto self = ctx.bot->game->player_manager.GetSelf();
+                if (!self) return ExecuteResult::Failure;
+                if (self->ship == 8) return ExecuteResult::Success; // spectator only
+                return ExecuteResult::Failure;
             })
-            .Child<ShipRequestNode>(0)
+            .Child<ShipRequestNode>("request_ship")
             .End()
 
+        // Chase puck when nobody has it
         .Sequence()
             .InvertChild<PowerballCarryQueryNode>()
             .Child<PowerballClosestQueryNode>("puck_position", true)
             .Child<HockeyAwarenessChaseNode>("puck_position")
             .End()
 
+        // Handle puck possession
         .Sequence()
             .Child<PowerballCarryQueryNode>()
             .Child<HockeyGoalQueryNode>("enemy_goal", true)
             .Child<HockeyShootingPositionNode>("shooting_position")
-            
+
             .Selector()
+
+                // Take shot if lane is clear
                 .Sequence()
-                    .Child<HockeyInShootingRangeNode>("shooting_position", 18.0f) 
+                    .Child<HockeyInShootingRangeNode>("enemy_goal", 35.0f)
                     .Child<LaneIsClearNode>("enemy_goal")
                     .Child<HockeyAimAndShootNode>("enemy_goal")
                     .End()
-                
+
+                // Pass if teammate is better positioned
                 .Sequence()
                     .Child<FindOpenTeammateNode>("pass_target", "enemy_goal")
                     .Child<HockeyAimAndShootNode>("pass_target")
                     .End()
-                
-                .Child<HockeyCarryPuckNode>("shooting_position")
-                .End()
-            .End()
 
+                // Otherwise carry puck to shooting position
+                .Child<HockeyCarryPuckNode>("shooting_position")
+
+            .End()
+        .End()
+
+        // Idle behavior (center ice)
         .Sequence()
             .Child<GoToNode>(center_ice)
             .End()
-        .End();
+
+    .End();
   // clang-format on
 
   return builder.Build();

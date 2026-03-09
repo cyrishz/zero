@@ -366,7 +366,7 @@ std::unique_ptr<behavior::BehaviorNode> MLHockeyBehavior::CreateTree(behavior::E
               if (self->ship >= 8) return ExecuteResult::Success;
               return ExecuteResult::Failure;
             })
-            .Child<ShipRequestNode>(0)  // Request Warbird
+            .Child<ShipRequestNode>("request_ship")
             .End()
 
         // If carrying the ball, aim and shoot
