@@ -1,79 +1,62 @@
-Adapting Zero to function within HZ's Server.  Still very much a work in progress.  
+================================================================================
+🚀 CyNotes: ZERO BOT HOCKEY ML INTEGRATION SUMMARY
+================================================================================
+Project: SubSpace/Continuum Hockey Bot (Zero Framework)
+Server: ASSS / HockeyZone (34.86.179.61:8501)
+Architecture: C++ Hybrid (Hardcoded Logic + ONNX Neural Networks)
+--------------------------------------------------------------------------------
 
-## Files Modified - Notes in those files
+1. 📂 DIRECTORY STRUCTURE
+-------------------------
+All custom development is located in: ~/zero/zero/zones/hockeyzone/
 
-### 1. `zero/zones/ZoneController.h`
-### 2. `zero/BotController.cpp`
+Files:
+- HockeyZone.cpp      : Main Controller. Registers behaviors and enables Actuator.
+- ShipBrains.h        : Multi-ship Neural Network dispatcher & Input Scaler.
+- MLBehavior.cpp/h    : ML-driven flight & puck chasing logic.
+- HockeyBehavior.cpp/h: Hardcoded baseline (Geometric seeking & shooting).
+- brains/             : Sub-folder containing onnx2c generated C code.
+  └── warbird_brain.c : The compiled Neural Network for the Warbird ship.
 
-zero/zones/svs/Svs.cpp`
-**Problem:** SVS controller claims `Zone::Subgame`, conflicting with our HockeyZone controller.
 
-**Solution:** Rename/disable the file.
+2. 🛠 CORE BASE-CODE MODIFICATIONS (Why the bot wasn't working)
+--------------------------------------------------------------
+To adapt the original "Zero" repo for ASSS/HockeyZone, we patched the core:
 
-```bash
-mv ~/zero/zero/zones/svs/Svs.cpp ~/zero/zero/zones/svs/Svs.cpp.bak
-```
+A. ZoneController.h (The "Join Fix"):
+   - Problem: VIE encryption prevents ?arena response; behaviors never loaded.
+   - Fix: Moved CreateBehaviors() from ArenaNameEvent to JoinGameEvent.
+   - Result: Bot "wakes up" immediately upon entering the arena.
 
-## Files Added
+B. BotController.cpp (The "Wipe Fix"):
+   - Problem: Bot was wiping its own behavior memory during the join packet.
+   - Fix: Commented out behaviors.Clear() in the JoinGameEvent handler.
 
-### 1. `zero/zones/hockeyzone/HockeyZone.cpp`
-New zone controller that handles `Zone::Subgame` and registers hockey behaviors.
+C. main.cpp (The "Identity Fix"):
+   - Problem: Server IP was not recognized as a specific "Zone."
+   - Fix: Mapped the "Subgame" server entry to the HockeyZoneController.
 
-### 2. `zero/zones/hockeyzone/HockeyBehavior.h`
-Header for hockey behavior, based on PowerballBehavior structure.
 
-### 3. `zero/zones/hockeyzone/HockeyBehavior.cpp`
-Hockey behavior implementation using powerball nodes for puck handling.
+3. 🧠 ML PIPELINE (The "ML" Tools)
+--------------------------------------
+We synchronized the Python training tools with the C++ Bot's coordinate system:
 
-## Configuration (zero.cfg)
+- convert.py  : Now extracts Ball Position (BX, BY) from .rec files.
+- prepare2.py : Vectorized processing. Converts raw pixels to TILE units (/16.0).
+- train2.py   : Trains the Neural Net (7 inputs -> 2 outputs [DirX, DirY]).
+- onnx2c      : Converts the .onnx model to pure C code for zero-dependency speed.
 
-```ini
-[Login]
-Server = Subgame
-Encryption = Subspace
 
-[Servers]
-Subgame = YOUR_SERVER_IP:PORT
-
+4. 🕹 BEHAVIOR MODES (Set in zero.cfg)
+--------------------------------------
 [General]
-Behavior = hockey
-RequestShip = 1
+Behavior = hockeyzoneml
 
-[Subgame]
-Behavior = hockey
-```
+A. "hockeyzoneml" (Neural Net + Logic):
+   - Chase: Driven by the Warbird Neural Network (MLSteerNode).
+   - Defense: Hardcoded "Checking" (fires bullets at enemies near the puck).
+   - Scoring: Hardcoded Crease-Awareness (repositions if behind the net).
 
-## Build Instructions
-
-```bash
-cd ~/zero/build
-cmake ..
-make -j4
-./zero
-```
-
-## How It Works
-
-1. Bot connects using VIE/Subspace encryption
-2. `JoinRequestEvent` fires -> `HockeyZoneController::IsZone(Zone::Subgame)` returns true -> `in_zone = true`
-3. `JoinGameEvent` fires -> triggers `CreateBehaviors("(public)")` -> registers "hockey" behavior
-4. `SetBehavior("hockey")` is called based on config
-5. Bot enters ship and executes hockey behavior tree (chase puck, find goal, score)
-
-## Known Limitations
-
-- Arena name is hardcoded to "(public)" since VIE clients don't receive arena list
-- Goal detection relies on map having goal tiles configured correctly
-- Some ASSS-specific features may not work (arena-specific behaviors based on name)
-
-## Next Steps (Phase 2)
-
-- Configure goal/crease coordinates for specific hockey map
-- Integrate ONNX/ML models for advanced decision making
-- Add goalie behavior
-- Add team coordination
-
-All hail the great plushmonkey and his work.  Extremely grateful for everything he has put together and I continue to work with on various different projects.
-
--Cyris
-Message me in Discord/In-game with questions
+B. "hockeyzone" (Pure Hardcoded):
+   - Chase: Direct geometric seeking to the ball.
+   - Shooting: Fixed coordinate aiming (Left Goal: 405, 511 | Right Goal: 618, 511).
