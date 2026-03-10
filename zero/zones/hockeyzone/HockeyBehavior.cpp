@@ -26,8 +26,9 @@ namespace hockeyzone {
 namespace HockeyConfig {
   constexpr float kLeftGoalX = 408.0f;
   constexpr float kRightGoalX = 615.0f;
-  constexpr float kGoalTopPostY = 499.0f;
-  constexpr float kGoalBottomPostY = 524.0f;
+  
+  constexpr float kGoalTopPostY = 502.0f;
+  constexpr float kGoalBottomPostY = 521.0f;
   
   constexpr float kLeftCreaseMinX = 405.0f;
   constexpr float kLeftCreaseMaxX = 419.0f;
@@ -38,11 +39,6 @@ namespace HockeyConfig {
   constexpr float kRightCreaseMaxX = 618.0f;
   constexpr float kRightCreaseMinY = 498.0f;
   constexpr float kRightCreaseMaxY = 525.0f;
-  
-  constexpr float kLeftShootX = 450.0f;
-  constexpr float kLeftShootY = 511.5f;
-  constexpr float kRightShootX = 573.0f;
-  constexpr float kRightShootY = 511.5f;
   
   constexpr float kCenterX = 512.0f;
   constexpr float kCenterY = 511.5f;
@@ -177,8 +173,7 @@ struct HockeyAwarenessChaseNode : public behavior::BehaviorNode {
     if (carrier) {
       if (carrier->frequency == self->frequency) {
         Vector2f open_pos;
-        open_pos.x = (self->frequency == 0) ? HockeyConfig::kRightShootX : HockeyConfig::kLeftShootX;
-        
+        open_pos.x = (self->frequency == 0) ? 590.0f : 434.0f;
         open_pos.y = (carrier->position.y > HockeyConfig::kCenterY) 
                      ? HockeyConfig::kCenterY - 15.0f 
                      : HockeyConfig::kCenterY + 15.0f;
@@ -187,7 +182,7 @@ struct HockeyAwarenessChaseNode : public behavior::BehaviorNode {
             ctx.bot->bot_controller->steering.force = Vector2f(0, 0); 
             ctx.bot->bot_controller->steering.Face(*ctx.bot->game, puck_pos); 
         } else {
-            ctx.bot->bot_controller->steering.force = open_pos - self->position; 
+            ctx.bot->bot_controller->steering.force = Normalize(open_pos - self->position) * 18.0f; 
         }
         return behavior::ExecuteResult::Success;
         
@@ -195,7 +190,7 @@ struct HockeyAwarenessChaseNode : public behavior::BehaviorNode {
         Vector2f to_enemy = carrier->position - self->position;
         float dist_to_enemy = self->position.Distance(carrier->position);
         
-        ctx.bot->bot_controller->steering.force = to_enemy; 
+        ctx.bot->bot_controller->steering.force = Normalize(to_enemy) * 25.0f;
         
         if (dist_to_enemy <= 2.0f) {
             ctx.bot->bot_controller->steering.Face(*ctx.bot->game, carrier->position);
@@ -214,27 +209,12 @@ struct HockeyAwarenessChaseNode : public behavior::BehaviorNode {
         } else {
             ctx.blackboard.Set<int>("enforcer_cooldown", 0);
         }
-        
         return behavior::ExecuteResult::Success;
       }
     }
 
-    // UPGRADED: Loose puck chase (Anti-Orbiting Math)
-    float dist = self->position.Distance(puck_pos);
     Vector2f to_puck = puck_pos - self->position;
-    float current_speed = self->velocity.Length();
-    
-    if (dist < 14.5f) {
-      // We are in the lock-on zone. If going too fast, slam the brakes!
-      if (current_speed > 15.0f) {
-          ctx.bot->bot_controller->steering.force = -Normalize(self->velocity); 
-      } else {
-          // Normal speed? Aim straight for the puck. No more scaling force to zero!
-          ctx.bot->bot_controller->steering.force = to_puck;
-      }
-    } else {
-      ctx.bot->bot_controller->steering.force = to_puck;
-    }
+    ctx.bot->bot_controller->steering.force = Normalize(to_puck) * 30.0f; 
     
     return behavior::ExecuteResult::Success;
   }
@@ -257,11 +237,18 @@ struct HockeyCarryPuckNode : public behavior::BehaviorNode {
     Vector2f target = *opt_target;
     float current_speed = self->velocity.Length();
     
-    if (current_speed > 18.0f) {
+    if (self->position.x < HockeyConfig::kLeftGoalX - 1.0f) {
+        target = Vector2f(HockeyConfig::kLeftGoalX + 15.0f, HockeyConfig::kGoalBottomPostY + 15.0f);
+    } else if (self->position.x > HockeyConfig::kRightGoalX + 1.0f) {
+        target = Vector2f(HockeyConfig::kRightGoalX - 15.0f, HockeyConfig::kGoalTopPostY - 15.0f);
+    }
+    
+    // UPPED MAX SPEED TO 20.0f FOR LETHAL HAWK DIVES
+    if (current_speed > 20.0f) {
         ctx.bot->bot_controller->steering.force = Vector2f(0, 0); 
         ctx.bot->bot_controller->steering.Face(*ctx.bot->game, target); 
     } else {
-        ctx.bot->bot_controller->steering.force = target - self->position; 
+        ctx.bot->bot_controller->steering.force = Normalize(target - self->position) * 20.0f; 
     }
 
     return behavior::ExecuteResult::Success;
@@ -300,6 +287,7 @@ struct HockeyGoalQueryNode : public behavior::BehaviorNode {
   bool get_enemy_goal;
 };
 
+// THE HAWK DIVE: Sets waypoints that force Marvin to accelerate directly AT the net
 struct HockeyShootingPositionNode : public behavior::BehaviorNode {
   HockeyShootingPositionNode(const char* output_key) : output_key(output_key) {}
 
@@ -310,10 +298,18 @@ struct HockeyShootingPositionNode : public behavior::BehaviorNode {
     u16 freq = self->frequency;
     Vector2f shoot_pos;
     
-    if (freq == 0) {
-      shoot_pos = Vector2f(HockeyConfig::kRightShootX, HockeyConfig::kRightShootY);
-    } else {
-      shoot_pos = Vector2f(HockeyConfig::kLeftShootX, HockeyConfig::kLeftShootY);
+    if (freq == 0) { // Attacking Right Goal (615)
+      if (self->position.y < HockeyConfig::kCenterY) {
+          shoot_pos = Vector2f(610.0f, 545.0f); // Swoop to bottom post
+      } else {
+          shoot_pos = Vector2f(610.0f, 480.0f); // Swoop to top post
+      }
+    } else { // Attacking Left Goal (408)
+      if (self->position.y < HockeyConfig::kCenterY) {
+          shoot_pos = Vector2f(412.0f, 545.0f); // Swoop to bottom post
+      } else {
+          shoot_pos = Vector2f(412.0f, 480.0f); // Swoop to top post
+      }
     }
     
     ctx.blackboard.Set<Vector2f>(output_key, shoot_pos);
@@ -342,26 +338,21 @@ struct HockeyAimAndShootNode : public behavior::BehaviorNode {
     Vector2f to_goal = goal - my_pos;
     
     ctx.bot->bot_controller->steering.Face(*ctx.bot->game, goal);
-    
-    if (self->velocity.Length() > 8.0f) {
-        ctx.bot->bot_controller->steering.force = -Normalize(self->velocity);
-    } else {
-        ctx.bot->bot_controller->steering.force = Vector2f(0, 0); 
-    }
+    ctx.bot->bot_controller->steering.force = Vector2f(0, 0); // Coast to execute drift shot
     
     Vector2f heading = self->GetHeading();
     Vector2f goal_dir = Normalize(to_goal);
     float alignment = heading.Dot(goal_dir);
+    float speed = self->velocity.Length();
     
-    Log(LogLevel::Debug, "Aim: pos=(%.0f,%.0f) goal=(%.0f,%.0f) alignment=%.3f",
-        my_pos.x, my_pos.y, goal.x, goal.y, alignment);
+    Log(LogLevel::Debug, "Aim: pos=(%.0f,%.0f) goal=(%.0f,%.0f) alignment=%.3f speed=%.1f",
+        my_pos.x, my_pos.y, goal.x, goal.y, alignment, speed);
     
-    // UPGRADED: Tighter Sniper Alignment (from 0.97 to 0.99)
-    if (alignment > 0.99f) {
+    if (alignment > 0.96f) {
       if (std::strcmp(goal_key, "pass_target") == 0) {
-          Log(LogLevel::Info, "SNIPING PASS TO TEAMMATE! alignment=%.3f", alignment);
+          Log(LogLevel::Info, "SNIPING PASS TO TEAMMATE! alignment=%.3f speed=%.1f", alignment, speed);
       } else {
-          Log(LogLevel::Info, "FIRING SNAP SHOT AT POST! alignment=%.3f", alignment);
+          Log(LogLevel::Info, "FIRING LETHAL HAWK-DIVE SHOT! alignment=%.3f speed=%.1f", alignment, speed);
       }
       ctx.bot->game->soccer.FireBall(BallFireMethod::Gun);
       return behavior::ExecuteResult::Success;
@@ -373,33 +364,59 @@ struct HockeyAimAndShootNode : public behavior::BehaviorNode {
   const char* goal_key;
 };
 
+// THE MOMENTUM GUARANTEE
 struct HockeyInShootingRangeNode : public behavior::BehaviorNode {
-  HockeyInShootingRangeNode(const char* shoot_pos_key, float range = 18.0f) 
-      : shoot_pos_key(shoot_pos_key), range(range) {}
+  HockeyInShootingRangeNode(const char* target_key) : target_key(target_key) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     auto self = ctx.bot->game->player_manager.GetSelf();
     if (!self) return behavior::ExecuteResult::Failure;
 
-    if (IsInCrease(self->position)) {
-      return behavior::ExecuteResult::Failure;
+    if (IsInCrease(self->position)) return behavior::ExecuteResult::Failure;
+    
+    auto opt_target = ctx.blackboard.Value<Vector2f>(target_key);
+    if (!opt_target) return behavior::ExecuteResult::Failure;
+    
+    Vector2f target = *opt_target;
+    bool attacking_right = (self->frequency == 0);
+    bool in_kill_box = false;
+
+    // 1. Are we physically standing inside the Pro Kill Box?
+    if (attacking_right) {
+        if (self->position.x >= 560.0f && self->position.x <= 620.0f &&
+            self->position.y >= 485.0f && self->position.y <= 545.0f) {
+            in_kill_box = true;
+        }
+    } else {
+        if (self->position.x >= 405.0f && self->position.x <= 465.0f &&
+            self->position.y >= 485.0f && self->position.y <= 545.0f) {
+            in_kill_box = true;
+        }
+    }
+    
+    if (!in_kill_box) return behavior::ExecuteResult::Failure;
+
+    // 2. The Momentum Check: Are we fast enough?
+    float current_speed = self->velocity.Length();
+    if (current_speed < 12.0f) {
+        return behavior::ExecuteResult::Failure; // Too slow, keep cycling the puck
     }
 
-    auto opt_shoot_pos = ctx.blackboard.Value<Vector2f>(shoot_pos_key);
-    if (!opt_shoot_pos) return behavior::ExecuteResult::Failure;
-
-    // We calculate distance to the target key dynamically
-    float dist = self->position.Distance(*opt_shoot_pos);
+    // 3. The Trajectory Check: Is our momentum physically carrying us towards the net?
+    Vector2f vel_dir = Normalize(self->velocity);
+    Vector2f goal_dir = Normalize(target - self->position);
+    float momentum_alignment = vel_dir.Dot(goal_dir);
     
-    if (dist <= range) {
-      return behavior::ExecuteResult::Success;
+    // A dot product of 0.3 ensures our velocity vector is heavily pointed AT the goal!
+    // If we picked up the puck while moving backward, this fails, and we hold the puck to rebuild momentum.
+    if (momentum_alignment < 0.3f) {
+        return behavior::ExecuteResult::Failure; 
     }
-    
-    return behavior::ExecuteResult::Failure;
+
+    return behavior::ExecuteResult::Success;
   }
 
-  const char* shoot_pos_key;
-  float range;
+  const char* target_key;
 };
 
 std::unique_ptr<behavior::BehaviorNode> HockeyBehavior::CreateTree(behavior::ExecuteContext& ctx) {
@@ -411,59 +428,46 @@ std::unique_ptr<behavior::BehaviorNode> HockeyBehavior::CreateTree(behavior::Exe
   // clang-format off
   builder
     .Selector()
-
-        // Only request a ship if the bot is spectating.
-        // This respects zero.cfg RequestShip and !setship commands.
         .Sequence()
             .Child<ExecuteNode>([](ExecuteContext& ctx) {
-                auto self = ctx.bot->game->player_manager.GetSelf();
-                if (!self) return ExecuteResult::Failure;
-                if (self->ship == 8) return ExecuteResult::Success; // spectator only
-                return ExecuteResult::Failure;
+              auto self = ctx.bot->game->player_manager.GetSelf();
+              if (!self) return ExecuteResult::Failure;
+              if (self->ship >= 8) return ExecuteResult::Success;
+              return ExecuteResult::Failure;
             })
-            .Child<ShipRequestNode>("request_ship")
+            .Child<ShipRequestNode>(0)
             .End()
 
-        // Chase puck when nobody has it
         .Sequence()
             .InvertChild<PowerballCarryQueryNode>()
             .Child<PowerballClosestQueryNode>("puck_position", true)
             .Child<HockeyAwarenessChaseNode>("puck_position")
             .End()
 
-        // Handle puck possession
         .Sequence()
             .Child<PowerballCarryQueryNode>()
             .Child<HockeyGoalQueryNode>("enemy_goal", true)
             .Child<HockeyShootingPositionNode>("shooting_position")
-
+            
             .Selector()
-
-                // Take shot if lane is clear
                 .Sequence()
-                    .Child<HockeyInShootingRangeNode>("enemy_goal", 35.0f)
-                    .Child<LaneIsClearNode>("enemy_goal")
+                    .Child<HockeyInShootingRangeNode>("enemy_goal") 
                     .Child<HockeyAimAndShootNode>("enemy_goal")
                     .End()
-
-                // Pass if teammate is better positioned
+                
                 .Sequence()
                     .Child<FindOpenTeammateNode>("pass_target", "enemy_goal")
                     .Child<HockeyAimAndShootNode>("pass_target")
                     .End()
-
-                // Otherwise carry puck to shooting position
+                
                 .Child<HockeyCarryPuckNode>("shooting_position")
-
+                .End()
             .End()
-        .End()
 
-        // Idle behavior (center ice)
         .Sequence()
             .Child<GoToNode>(center_ice)
             .End()
-
-    .End();
+        .End();
   // clang-format on
 
   return builder.Build();

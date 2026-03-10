@@ -8,6 +8,7 @@
 #include <zero/zones/ZoneController.h>
 #include <zero/zones/hockeyzone/HockeyBehavior.h>
 #include <zero/zones/hockeyzone/MLBehavior.h>
+#include "GoalieBehavior.h"
 
 namespace zero {
 namespace hockeyzone {
@@ -32,22 +33,38 @@ void HockeyZoneController::HandleEvent(const ChatEvent& event) {
   if (msg.rfind("!setship ", 0) == 0) {
     int user_ship = atoi(msg.substr(9).c_str());
 
-    // Validate that it's a standard player-facing ship number (1-8)
-    if (user_ship < 1 || user_ship > 8) {
-      Log(LogLevel::Warning, "Invalid ship requested: %d. Please use 1-8.", user_ship);
+    // Validate that it's a standard ship (1-8) or spectator (9)
+    if (user_ship < 1 || user_ship > 9) {
+      Log(LogLevel::Warning, "Invalid ship requested: %d. Please use 1-9.", user_ship);
       return;
     }
 
-    // Convert to the server's internal index (0-7)
-    int internal_ship = user_ship - 1;
-
-    Log(LogLevel::Info, "Ship change requested: User %d -> Internal %d", user_ship, internal_ship);
-
-    // Update the blackboard so the behavior tree adopts the new default
-    bot->execute_ctx.blackboard.Set("request_ship", internal_ship);
-
-    // Send the immediate network request
-    bot->game->connection.SendShipRequest(internal_ship);
+    if (user_ship == 9) {
+      Log(LogLevel::Info, "Spectator mode requested. Suspending ML AI.");
+      
+      // Update blackboard just to keep it in sync
+      bot->execute_ctx.blackboard.Set("request_ship", 8);
+      
+      // Suspend the active behavior so the tree stops fighting us!
+      SetBehavior(""); 
+      
+      // Send the standard ship request packet to drop to spec
+      bot->game->connection.SendShipRequest(8);
+    } else {
+      // Convert to the server's internal index (0-7)
+      int internal_ship = user_ship - 1;
+      
+      Log(LogLevel::Info, "Ship change requested: User %d -> Internal %d", user_ship, internal_ship);
+      
+      // Update blackboard for respawns
+      bot->execute_ctx.blackboard.Set("request_ship", internal_ship);
+      
+      // Re-enable the bot's brain so it starts playing again!
+      SetBehavior("hockeyzoneml");
+      
+      // Send the standard ship request packet
+      bot->game->connection.SendShipRequest(internal_ship);
+    }
   }
 }
 
@@ -70,6 +87,11 @@ void HockeyZoneController::CreateBehaviors(const char* arena_name) {
   
   Log(LogLevel::Info, "Behaviors registered: 'hockeyzone' (hardcoded), 'hockeyzoneml' (ML)");
   
+  // Goalie behavior - use with: !behavior goalie
+  repo.Add("goalie", std::make_unique<GoalieBehavior>()); // <-- ADD THIS LINE
+
+  // Optional: Update your log message so you know it loaded!
+  Log(LogLevel::Info, "Behaviors registered: 'hockeyzone' (hardcoded), 'hockeyzoneml' (ML), 'goalie'");
   // Default to ML - but zero.cfg [General] Behavior setting will override this
   SetBehavior("hockeyzoneml");
 }
