@@ -3,11 +3,14 @@
     
     BASE BEHAVIOR FOCUS:
     - Pure Elliptical Arc mirroring
-    - "Linix" Broadside Flight (No 180-degree turns, uses reverse AB)
-    - Y-Axis Sensitive Deadzone (Calm depth, aggressive lateral tracking)
-    - True Shot Tracking (Ignores shooter velocity on slappers)
-    - Anti-Tangle Goal Line Repulsor & Y-Axis-Only Dives
-    - Goal Scored Metric Logging
+    - Dynamic Angle Challenge (Red Line to Blue Line interpolation)
+    - "Linix" Broadside Flight (No 180-degree turns)
+    - True Shot Tracking (Checks if puck is unattached)
+    - Isolated Emergency Dive Mechanics (Fixes steering conflicts)
+    - Anti-Tangle Goal Line Repulsor (Global Override)
+    - Offensive Defense (Point-Blank Single Bullet Taps)
+    - Restless Micro-Movement (Anti-Stall)
+    - Velocity Mirroring (Proactive Y-Axis Tracking)
 */
 
 #include "GoalieBehavior.h"
@@ -37,8 +40,18 @@ namespace GoalieConfig {
     constexpr float kCenterY[2] = { 511.5f, 736.0f }; 
 
     constexpr float kPostOffset = 13.5f;    
+    
+    // --- RED LINE (Base/Retreat Arc) ---
     constexpr float kMinDepth = 2.0f;       
     constexpr float kMaxArcDepth = 7.0f;    
+    
+    // --- BLUE LINE (Challenge Arc) ---
+    constexpr float kChallengeMinDepth = 5.0f;       // Pushed out at the posts
+    constexpr float kChallengeMaxArcDepth = 15.0f;   // Pushed out at center
+    
+    // --- CHALLENGE TRIGGER DISTANCES ---
+    constexpr float kChallengeStartDist = 35.0f;     // Push out when threat is far
+    constexpr float kChallengeRetreatDist = 18.0f;   // Retreat when threat gets close
 }
 
 // =============================================================================
@@ -91,13 +104,16 @@ struct GoalieDefendNode : public behavior::BehaviorNode {
         // === FIND THE THREAT ===
         Vector2f threat_pos = puck_pos;
         Vector2f threat_vel(0, 0);
+        float dist_to_puck_carrier = 999.0f;
         
         for (size_t i = 0; i < ctx.bot->game->player_manager.player_count; ++i) {
             Player* p = ctx.bot->game->player_manager.players + i;
             if (p->ship >= 8 || p->frequency == self->frequency) continue;
             if (std::abs(p->position.y - center_y) > 100.0f) continue;
 
-            if (p->position.Distance(puck_pos) < 3.0f) {
+            float dist = p->position.Distance(puck_pos);
+            if (dist < 3.0f) {
+                dist_to_puck_carrier = dist;
                 threat_pos = p->position;
                 threat_vel = p->velocity;
                 break;
@@ -116,23 +132,51 @@ struct GoalieDefendNode : public behavior::BehaviorNode {
         float predicted_y = threat_pos.y;
         float puck_speed = puck_vel_tick.Length() * 100.0f; 
         
-        bool is_fast_shot = (puck_speed > 35.0f);
+        bool is_fast_shot = (puck_speed > 35.0f && dist_to_puck_carrier > 1.5f);
 
         if (is_fast_shot) {
             prediction_time = std::clamp(puck_speed / 100.0f, 0.15f, 0.40f);
             predicted_y = puck_pos.y + (puck_vel_tick.y * 100.0f) * prediction_time;
         } else {
             float threat_speed = threat_vel.Length();
-            prediction_time = std::clamp(0.10f + (threat_speed * 0.005f), 0.10f, 0.35f);
+            prediction_time = std::clamp(0.15f + (threat_speed * 0.02f), 0.15f, 0.70f);
             predicted_y = threat_pos.y + threat_vel.y * prediction_time;
         }
 
+        // TWEAK: Restored strict post-to-post limit. 
         float want_y = std::clamp(predicted_y, top_post_y, bottom_post_y);
+
+        // === DYNAMIC ANGLE CHALLENGE (RED TO BLUE LINE) ===
+        float threat_dist_x = 0.0f;
+        if (defend_left && threat_pos.x > goal_line_x) {
+            threat_dist_x = threat_pos.x - goal_line_x;
+        } else if (!defend_left && threat_pos.x < goal_line_x) {
+            threat_dist_x = goal_line_x - threat_pos.x;
+        }
+        
+        float challenge_factor = std::clamp(
+            (threat_dist_x - GoalieConfig::kChallengeRetreatDist) / 
+            (GoalieConfig::kChallengeStartDist - GoalieConfig::kChallengeRetreatDist), 
+            0.0f, 1.0f
+        );
+
+        float current_min_depth = GoalieConfig::kMinDepth + 
+            (GoalieConfig::kChallengeMinDepth - GoalieConfig::kMinDepth) * challenge_factor;
+        float current_max_depth = GoalieConfig::kMaxArcDepth + 
+            (GoalieConfig::kChallengeMaxArcDepth - GoalieConfig::kMaxArcDepth) * challenge_factor;
 
         float dy = want_y - center_y;
         float arc_ratio = std::sqrt(std::max(0.0f, 1.0f - (dy * dy) / (GoalieConfig::kPostOffset * GoalieConfig::kPostOffset)));
-        float depth = GoalieConfig::kMinDepth + (GoalieConfig::kMaxArcDepth - GoalieConfig::kMinDepth) * arc_ratio;
+        float depth = current_min_depth + (current_max_depth - current_min_depth) * arc_ratio;
+        
         float want_x = defend_left ? (goal_line_x + depth) : (goal_line_x - depth);
+        
+        if (defend_left) {
+            want_x = std::max(want_x, goal_line_x + 1.5f);
+        } else {
+            want_x = std::min(want_x, goal_line_x - 1.5f);
+        }
+
         Vector2f target(want_x, want_y);
 
         // === FLIGHT DYNAMICS ===
@@ -150,58 +194,84 @@ struct GoalieDefendNode : public behavior::BehaviorNode {
 
         ctx.blackboard.Set<bool>("defend_is_moving", is_moving);
         ctx.bot->bot_controller->steering.force = Vector2f(0, 0);
+        bool use_ab = false;
 
         if (is_moving) {
-            float max_thrust = is_fast_shot ? 40.0f : 25.0f;
-            float speed_multiplier = is_fast_shot ? 8.0f : 4.0f;
-            
-            float desired_speed = std::min(max_thrust, dist_to_target * speed_multiplier);
-            Vector2f desired_velocity = Normalize(to_target) * desired_speed;
-            Vector2f force_needed = desired_velocity - self->velocity;
-            
-            // BUGFIX 1: ANTI-NET-TANGLE REPULSOR
-            // If momentum drags us behind the crease, inject massive outward force
-            if (defend_left && self->position.x < goal_line_x + 1.0f) {
-                force_needed.x += 40.0f; 
-            } else if (!defend_left && self->position.x > goal_line_x - 1.0f) {
-                force_needed.x -= 40.0f;
-            }
+            use_ab = is_fast_shot && y_dist_to_target > 2.0f && self->energy > 400.0f;
 
-            // Broadside navigation 
-            if (force_needed.y <= 0) {
-                ctx.bot->bot_controller->steering.Face(*ctx.bot->game, self->position + force_needed);
-                ctx.bot->bot_controller->steering.force = force_needed;
+            if (use_ab) {
+                ctx.bot->bot_controller->steering.Face(*ctx.bot->game, target);
+                ctx.bot->bot_controller->steering.force = Normalize(to_target) * 100.0f; 
             } else {
-                ctx.bot->bot_controller->steering.Face(*ctx.bot->game, self->position - force_needed);
-                ctx.bot->bot_controller->steering.force = force_needed; 
+                float desired_speed = std::min(40.0f, dist_to_target * 4.0f);
+                Vector2f desired_velocity = Normalize(to_target) * desired_speed;
+                Vector2f force_needed = desired_velocity - self->velocity;
+                
+                // TWEAK: Velocity Mirroring. Add a percentage of the threat's Y-velocity directly to our force.
+                // This makes the goalie proactively match the skater's speed as they blaze across the crease.
+                if (!is_fast_shot) {
+                    force_needed.y += (threat_vel.y * 0.40f); 
+                }
+                
+                if (force_needed.y <= 0) {
+                    ctx.bot->bot_controller->steering.Face(*ctx.bot->game, self->position + force_needed);
+                } else {
+                    ctx.bot->bot_controller->steering.Face(*ctx.bot->game, self->position - force_needed);
+                }
+                ctx.bot->bot_controller->steering.force = force_needed;
             }
-            
-            // BUGFIX 2: LATERAL AFTERBURNER LOCK
-            // Only dive for Y-axis emergencies. Never afterburn just to adjust X-axis depth!
-            bool use_ab = is_fast_shot && y_dist_to_target > 2.0f && self->energy > 800.0f;
-            if (!use_ab) use_ab = (y_dist_to_target > 5.0f && self->energy > 1000.0f);
-            
-            ctx.bot->bot_controller->input->SetAction(InputAction::Afterburner, use_ab);
         } else {
-            Vector2f brake_force = -self->velocity * 4.0f;
+            // PLANTED - Restless micro-movement
+            static int restless_tick = 0;
+            restless_tick++;
+            
+            Vector2f brake_force = -self->velocity * 3.8f; 
+            float restless_bump = (restless_tick % 40 < 20) ? 1.5f : -1.5f;
+            brake_force.y += restless_bump;
+
             if (brake_force.y <= 0) {
                 ctx.bot->bot_controller->steering.Face(*ctx.bot->game, self->position + brake_force);
             } else {
                 ctx.bot->bot_controller->steering.Face(*ctx.bot->game, self->position - brake_force);
             }
             ctx.bot->bot_controller->steering.force = brake_force; 
-            ctx.bot->bot_controller->input->SetAction(InputAction::Afterburner, false);
         }
 
+        // === GLOBAL OVERRIDES ===
+        // 1. Anti-Phase Repulsor (Always Active)
+        Vector2f final_force = ctx.bot->bot_controller->steering.force;
+        if (defend_left && self->position.x < goal_line_x + 1.0f) {
+            final_force.x += 35.0f; 
+        } else if (!defend_left && self->position.x > goal_line_x - 1.0f) {
+            final_force.x -= 35.0f;
+        }
+        ctx.bot->bot_controller->steering.force = final_force;
+
+        // 2. Offensive Defense (Point-Blank Single Bullet Tap)
+        static int bullet_cooldown = 0;
+        bool use_bullet = false;
+        
+        if (bullet_cooldown > 0) {
+            bullet_cooldown--;
+        }
+        
+        float current_dist_to_threat = self->position.Distance(threat_pos);
+        if (current_dist_to_threat <= 2.5f && bullet_cooldown <= 0 && self->energy > 500.0f) {
+            use_bullet = true;
+            bullet_cooldown = 150; 
+        }
+
+        // Apply auxiliary inputs
         if (ctx.bot->bot_controller->input) {
-            ctx.bot->bot_controller->input->SetAction(InputAction::Bullet, false);
+            ctx.bot->bot_controller->input->SetAction(InputAction::Afterburner, use_ab);
+            ctx.bot->bot_controller->input->SetAction(InputAction::Bullet, use_bullet);
         }
 
         // --- THROTTLED DEBUG LOGGING ---
         static int defend_ticks = 0;
         if (++defend_ticks % 100 == 0) {
-            Log(LogLevel::Info, "[Defend] Threat:(%.1f, %.1f) | Target:(%.1f, %.1f) | FastShot:%d | Moving:%d", 
-                threat_pos.x, threat_pos.y, want_x, want_y, is_fast_shot, is_moving);
+            Log(LogLevel::Info, "[Defend] Threat:(%.1f, %.1f) | Target:(%.1f, %.1f) | FastShot:%d | Moving:%d | Challenge:%.2f", 
+                threat_pos.x, threat_pos.y, want_x, want_y, is_fast_shot, is_moving, challenge_factor);
         }
 
         return behavior::ExecuteResult::Success;
@@ -294,7 +364,7 @@ struct GoalieIdleNode : public behavior::BehaviorNode {
         ctx.bot->bot_controller->steering.force = Vector2f(0, 0);
 
         if (is_moving) {
-            float desired_speed = std::min(25.0f, dist_to_home * 4.0f);
+            float desired_speed = std::min(40.0f, dist_to_home * 4.0f);
             Vector2f desired_velocity = Normalize(to_home) * desired_speed;
             Vector2f force_needed = desired_velocity - self->velocity;
             
@@ -351,7 +421,7 @@ std::unique_ptr<behavior::BehaviorNode> GoalieBehavior::CreateTree(behavior::Exe
 
                 .Child<GoalieIdleNode>()
                 .End()
-            .End();
+        .End();
 
     return builder.Build();
 }

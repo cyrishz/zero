@@ -9,6 +9,7 @@
 #include <zero/zones/hockeyzone/HockeyBehavior.h>
 #include <zero/zones/hockeyzone/MLBehavior.h>
 #include "GoalieBehavior.h"
+#include "DefenderBehavior.h"
 
 namespace zero {
 namespace hockeyzone {
@@ -121,6 +122,11 @@ void HockeyZoneController::CreateBehaviors(const char* arena_name) {
   
   // Goalie behavior - use with: !behavior goalie
   repo.Add("goalie", std::make_unique<GoalieBehavior>()); // <-- ADD THIS LINE
+  
+ // Defender behavior - use with: !behavior defender
+  repo.Add("defender", std::make_unique<DefenderBehavior>()); // <-- ADD THIS
+
+  Log(LogLevel::Info, "Behaviors registered: 'hockeyzone', 'hockeyzoneml', 'goalie', 'defender'"); 
 
   // Optional: Update your log message so you know it loaded!
   Log(LogLevel::Info, "Behaviors registered: 'hockeyzone' (hardcoded), 'hockeyzoneml' (ML), 'goalie'");
