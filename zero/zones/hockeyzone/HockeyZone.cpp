@@ -10,6 +10,7 @@
 #include <zero/zones/hockeyzone/MLBehavior.h>
 #include "GoalieBehavior.h"
 #include "DefenderBehavior.h"
+#include "OffenseBehavior.h"
 
 namespace zero {
 namespace hockeyzone {
@@ -72,13 +73,13 @@ void HockeyZoneController::HandleEvent(const ChatEvent& event) {
     if (user_ship == 9) {
       Log(LogLevel::Info, "Spectator mode requested. Suspending AI.");
       
-      // Update blackboard just to keep it in sync
+      // 1. Update blackboard so any dynamic nodes know we want to stay in spec
       bot->execute_ctx.blackboard.Set("request_ship", 8);
       
-      // Suspend the active behavior so the tree stops fighting us
+      // 2. Suspend the active behavior so the tree stops fighting us
       SetBehavior(""); 
       
-      // Send the standard ship request packet to drop to spec
+      // 3. Send the TRUE Subspace packet to drop ship into the stands
       bot->game->connection.SendShipRequest(8);
     } else {
       // Convert to the server's internal index (0-7)
@@ -118,18 +119,17 @@ void HockeyZoneController::CreateBehaviors(const char* arena_name) {
   // ML behavior - use with: Behavior = hockeyzoneml
   repo.Add("hockeyzoneml", std::make_unique<MLHockeyBehavior>());
   
-  Log(LogLevel::Info, "Behaviors registered: 'hockeyzone' (hardcoded), 'hockeyzoneml' (ML)");
-  
   // Goalie behavior - use with: !behavior goalie
-  repo.Add("goalie", std::make_unique<GoalieBehavior>()); // <-- ADD THIS LINE
+  repo.Add("goalie", std::make_unique<GoalieBehavior>()); 
   
- // Defender behavior - use with: !behavior defender
-  repo.Add("defender", std::make_unique<DefenderBehavior>()); // <-- ADD THIS
+  // Offense behavior - use with: !behavior offense
+  repo.Add("offense", std::make_unique<OffenseBehavior>());
+  
+  // Defender behavior - use with: !behavior defender
+  repo.Add("defender", std::make_unique<DefenderBehavior>()); 
 
-  Log(LogLevel::Info, "Behaviors registered: 'hockeyzone', 'hockeyzoneml', 'goalie', 'defender'"); 
+  Log(LogLevel::Info, "Behaviors registered: 'hockeyzone', 'hockeyzoneml', 'goalie', 'offense', 'defender'"); 
 
-  // Optional: Update your log message so you know it loaded!
-  Log(LogLevel::Info, "Behaviors registered: 'hockeyzone' (hardcoded), 'hockeyzoneml' (ML), 'goalie'");
   // Default to ML - but zero.cfg [General] Behavior setting will override this
   SetBehavior("hockeyzoneml");
 }

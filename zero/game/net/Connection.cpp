@@ -624,12 +624,18 @@ void Connection::ProcessPacket(u8* pkt, size_t size) {
         security.timestamp = buffer.ReadU32();
         security.checksum_key = buffer.ReadU32();
 
+        Log(LogLevel::Info, "[SECURITY] Received security packet: key=%08X map_checksum=%08X", 
+            security.checksum_key, map.checksum);
+
         map.door_rng.Seed(security.door_seed);
         map.last_seed_tick = MAKE_TICK(security.timestamp - time_diff);
         map.UpdateDoors(settings, true);
 
-        if (security.checksum_key && map.checksum) {
+        if (security.checksum_key) {
+          Log(LogLevel::Info, "[SECURITY] Sending security response for key %08X", security.checksum_key);
           SendSecurityPacket();
+        } else {
+          Log(LogLevel::Info, "[SECURITY] checksum_key is 0, not sending response");
         }
       } break;
       case ProtocolS2C::FlagPosition: {
