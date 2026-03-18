@@ -91,9 +91,6 @@ inline bool IsLaneClear(Game& game, Vector2f start, Vector2f end, u16 my_freq) {
   return true;
 }
 
-// =====================================================================
-// ANONYMOUS NAMESPACE: Prevents ODR linker collisions with other files
-// =====================================================================
 namespace {
 
 struct LaneIsClearNode : public behavior::BehaviorNode {
@@ -112,6 +109,56 @@ struct LaneIsClearNode : public behavior::BehaviorNode {
     return behavior::ExecuteResult::Failure;
   }
   const char* target_key;
+};
+
+struct FindGiveAndGoTeammateNode : public behavior::BehaviorNode {
+  FindGiveAndGoTeammateNode(const char* pass_target_id_key, const char* enemy_goal_key) 
+      : pass_target_id_key(pass_target_id_key), enemy_goal_key(enemy_goal_key) {}
+
+  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    auto self = ctx.bot->game->player_manager.GetSelf();
+    auto opt_goal = ctx.blackboard.Value<Vector2f>(enemy_goal_key);
+    if (!self || !opt_goal) return behavior::ExecuteResult::Failure;
+
+    float my_speed = self->velocity.Length();
+    if (my_speed > 8.0f) return behavior::ExecuteResult::Failure;
+
+    Player* bomber = nullptr;
+    float best_bomber_score = -1.0f;
+
+    for (size_t i = 0; i < ctx.bot->game->player_manager.player_count; ++i) {
+      Player* p = ctx.bot->game->player_manager.players + i;
+      if (p->id == self->id || p->frequency != self->frequency || p->ship >= 8) continue;
+
+      float their_speed = p->velocity.Length();
+      
+      if (their_speed < 14.0f) continue;
+
+      Vector2f to_goal = Normalize(*opt_goal - p->position);
+      Vector2f their_heading = Normalize(p->velocity);
+      float goal_alignment = their_heading.Dot(to_goal);
+
+      if (goal_alignment < 0.5f) continue; 
+
+      if (!IsLaneClear(*ctx.bot->game, self->position, p->position, self->frequency)) continue;
+
+      float score = their_speed * goal_alignment;
+      if (score > best_bomber_score) {
+          best_bomber_score = score;
+          bomber = p;
+      }
+    }
+
+    if (bomber) {
+      ctx.blackboard.Set<u16>(pass_target_id_key, bomber->id);
+      Log(LogLevel::Info, "GIVE AND GO INITIATED! Target: %s (Speed: %.1f)", bomber->name, bomber->velocity.Length());
+      return behavior::ExecuteResult::Success;
+    }
+
+    return behavior::ExecuteResult::Failure;
+  }
+  const char* pass_target_id_key;
+  const char* enemy_goal_key;
 };
 
 struct FindOpenTeammateNode : public behavior::BehaviorNode {
@@ -211,6 +258,7 @@ struct HockeySlotPositionNode : public behavior::BehaviorNode {
     float dist_to_slot = self->position.Distance(slot_pos);
     float speed = self->velocity.Length();
 
+    // TAZ FIX: Utilizing Seek to prevent overshooting/orbiting the slot
     if (dist_to_slot < 6.0f) {
         if (speed > 1.0f) {
             ctx.bot->bot_controller->steering.force = -Normalize(self->velocity) * 15.0f;
@@ -219,7 +267,7 @@ struct HockeySlotPositionNode : public behavior::BehaviorNode {
         }
         ctx.bot->bot_controller->steering.Face(*ctx.bot->game, enemy_goal); 
     } else {
-        ctx.bot->bot_controller->steering.force += Normalize(slot_pos - self->position) * 20.0f;
+        ctx.bot->bot_controller->steering.Seek(*ctx.bot->game, slot_pos);
         ctx.bot->bot_controller->steering.Face(*ctx.bot->game, slot_pos);
     }
 
@@ -248,13 +296,19 @@ struct HockeySeekAndDestroyNode : public behavior::BehaviorNode {
 
     if (!carrier) return behavior::ExecuteResult::Failure;
 
-    Vector2f to_enemy = carrier->position - self->position;
-    float dist = to_enemy.Length();
+    float dist = self->position.Distance(carrier->position);
     
-    ctx.bot->bot_controller->steering.force += Normalize(to_enemy) * 25.0f;
+    // TAZ FIX: Pursue logic! Extrapolate enemy position to intercept them
+    float intercept_time = dist / 22.0f; // Assumed bot intercept speed
+    Vector2f intercept_pos = carrier->position + (carrier->velocity * intercept_time);
+    
+    // Seek the predicted interception point to prevent trailing them
+    ctx.bot->bot_controller->steering.Seek(*ctx.bot->game, intercept_pos);
     ctx.bot->bot_controller->steering.Face(*ctx.bot->game, carrier->position);
 
     Vector2f heading = self->GetHeading();
+    Vector2f to_enemy = carrier->position - self->position;
+    
     if (dist <= 20.0f && heading.Dot(Normalize(to_enemy)) > 0.85f) {
         if (ctx.bot->bot_controller->input) {
             ctx.bot->bot_controller->input->SetAction(InputAction::Bullet, true);
@@ -284,32 +338,17 @@ struct HockeyLoosePuckChaseNode : public behavior::BehaviorNode {
     }
 
     Vector2f puck_pos = *opt_puck;
-    Vector2f to_puck = puck_pos - self->position;
-    float dist = to_puck.Length();
+    float dist = self->position.Distance(puck_pos);
     float speed = self->velocity.Length();
-    Vector2f puck_dir = dist > 0.0f ? to_puck / dist : self->GetHeading();
-    
-    Vector2f vel_dir = speed > 0.1f ? Normalize(self->velocity) : self->GetHeading();
-    float momentum_alignment = vel_dir.Dot(puck_dir);
-    float physical_alignment = self->GetHeading().Dot(puck_dir);
 
     ctx.bot->bot_controller->steering.Face(*ctx.bot->game, puck_pos);
 
-    if (dist < 12.0f && speed > 5.0f && momentum_alignment > 0.85f) {
-        ctx.bot->bot_controller->steering.force = Vector2f(0, 0); 
-        return behavior::ExecuteResult::Success;
-    }
-
-    if (physical_alignment > 0.8f) {
-        ctx.bot->bot_controller->steering.force += puck_dir * 25.0f;
-    } else if (physical_alignment > 0.3f) {
-        ctx.bot->bot_controller->steering.force += puck_dir * 12.0f;
+    if (dist < 4.0f && speed > 5.0f) {
+        // Hard brake to ensure clean pickup without overshooting
+        ctx.bot->bot_controller->steering.force = -Normalize(self->velocity) * 15.0f;
     } else {
-        if (speed > 8.0f) {
-            ctx.bot->bot_controller->steering.force += -Normalize(self->velocity) * 18.0f;
-        } else {
-            ctx.bot->bot_controller->steering.force += puck_dir * 4.0f; 
-        }
+        // TAZ FIX: Utilizing Seek to completely eliminate the "orbiting" effect!
+        ctx.bot->bot_controller->steering.Seek(*ctx.bot->game, puck_pos);
     }
     
     return behavior::ExecuteResult::Success;
@@ -345,26 +384,16 @@ struct HockeyCarryPuckNode : public behavior::BehaviorNode {
         }
     }
     
-    Vector2f to_target = target - self->position;
-    float dist = to_target.Length();
-    Vector2f target_dir = dist > 0.0f ? to_target / dist : self->GetHeading();
-    float current_speed = self->velocity.Length();
-    float alignment = self->GetHeading().Dot(target_dir);
+    float dist = self->position.Distance(target);
+    float speed = self->velocity.Length();
 
     ctx.bot->bot_controller->steering.Face(*ctx.bot->game, target); 
     
-    if (current_speed > 22.0f && alignment > 0.8f) {
-        ctx.bot->bot_controller->steering.force = Vector2f(0, 0); 
+    // TAZ FIX: Use Seek for transit, apply brakes when close to the final zone
+    if (dist < 10.0f && speed > 5.0f) {
+        ctx.bot->bot_controller->steering.force = -Normalize(self->velocity) * 15.0f;
     } else {
-        if (alignment > 0.85f) {
-            ctx.bot->bot_controller->steering.force += target_dir * 22.0f; 
-        } else if (alignment > 0.3f) {
-            ctx.bot->bot_controller->steering.force += target_dir * 10.0f; 
-        } else {
-            if (current_speed > 5.0f) {
-                ctx.bot->bot_controller->steering.force += -Normalize(self->velocity) * 20.0f;
-            }
-        }
+        ctx.bot->bot_controller->steering.Seek(*ctx.bot->game, target);
     }
 
     return behavior::ExecuteResult::Success;
@@ -372,7 +401,6 @@ struct HockeyCarryPuckNode : public behavior::BehaviorNode {
   const char* target_key;
 };
 
-// Updated Goal Query with Momentum-Based "Bar-Down" targeting
 struct OffenseGoalQueryNode : public behavior::BehaviorNode {
   OffenseGoalQueryNode(const char* output_key, bool get_enemy_goal = true) 
       : output_key(output_key), get_enemy_goal(get_enemy_goal) {}
@@ -386,22 +414,16 @@ struct OffenseGoalQueryNode : public behavior::BehaviorNode {
     
     bool attacking_right = (get_enemy_goal && freq == 0) || (!get_enemy_goal && freq != 0);
     
-    // BAR-DOWN TARGETING TILES
     float inner_top_y = 504.0f;
     float inner_bottom_y = 529.0f;
     
     float target_y;
     
-    // DYNAMIC POST SELECTION BASED ON APPROACH MOMENTUM
-    // In Subspace, Y increases as you move South (down).
     if (self->velocity.y > 1.5f) {
-        // Sweeping North to South -> Target South Post
         target_y = inner_bottom_y; 
     } else if (self->velocity.y < -1.5f) {
-        // Sweeping South to North -> Target North Post
         target_y = inner_top_y;
     } else {
-        // Fallback for creeping/stationary shots: use relative position
         target_y = (self->position.y < HockeyConfig::kCenterY) ? inner_bottom_y : inner_top_y;
     }
 
@@ -511,13 +533,22 @@ struct DynamicAimAndShootNode : public behavior::BehaviorNode {
     Log(LogLevel::Debug, "Aim: pos=(%.1f,%.1f) tgt=(%.1f,%.1f) comp=(%.1f,%.1f) align=%.3f spd=%.1f",
         my_pos.x, my_pos.y, target_pos.x, target_pos.y, compensated_aim.x, compensated_aim.y, alignment, speed);
     
-    float required_alignment = 0.96f;
-    if (dist > 40.0f) required_alignment = 0.995f; 
-    else if (dist > 20.0f) required_alignment = 0.985f; 
-    if (is_player) required_alignment = 0.99f;
+    float required_alignment = 0.96f; 
     
-    if (alignment < 0.8f && speed > 5.0f) {
+    if (!is_player && dist > 53.0f) {
+        required_alignment = 0.985f; 
+    }
+
+    if (is_player) {
+        required_alignment = 0.98f; 
+    }
+
+    float max_speed = is_player ? 15.0f : 16.0f; 
+
+    if (speed > max_speed) {
         ctx.bot->bot_controller->steering.force = -Normalize(self->velocity) * 20.0f;
+    } else if (alignment < 0.9f && speed > 5.0f) {
+        ctx.bot->bot_controller->steering.force = -Normalize(self->velocity) * 15.0f;
     } else {
         ctx.bot->bot_controller->steering.force = Vector2f(0, 0); 
     }
@@ -606,17 +637,21 @@ std::unique_ptr<behavior::BehaviorNode> OffenseBehavior::CreateTree(behavior::Ex
             .Child<PowerballCarryQueryNode>()
             .Child<AvoidEnemyNode>(8.0f) 
             
-            .Child<OffenseGoalQueryNode>("enemy_goal", true) // Updated Node call
+            .Child<OffenseGoalQueryNode>("enemy_goal", true)
             .Child<HockeyShootingPositionNode>("shooting_position")
             
             .Selector()
                 .Sequence() 
+                    .Child<FindGiveAndGoTeammateNode>("pass_target_id", "enemy_goal")
+                    .Child<DynamicAimAndShootNode>("pass_target_id", true) 
+                    .End()
+                .Sequence() 
                     .Child<HockeyInShootingRangeNode>("enemy_goal")
-                    .Child<DynamicAimAndShootNode>("enemy_goal", false)
+                    .Child<DynamicAimAndShootNode>("enemy_goal", false) 
                     .End()
                 .Sequence() 
                     .Child<FindOpenTeammateNode>("pass_target_id", "enemy_goal")
-                    .Child<DynamicAimAndShootNode>("pass_target_id", true)
+                    .Child<DynamicAimAndShootNode>("pass_target_id", true) 
                     .End()
                 .Sequence() 
                     .Child<ShipTraverseQueryNode>("shooting_position")

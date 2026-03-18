@@ -457,11 +457,15 @@ void Connection::ProcessPacket(u8* pkt, size_t size) {
         encrypt.resend_count = 0;
 
         security_solver.ExpandKey(key2, [this](u32* table) {
-          if (table) {
-            Log(LogLevel::Debug, "Successfully expanded continuum encryption keys.");
-            memcpy(encrypt.expanded_key, table, sizeof(encrypt.expanded_key));
-            encrypt.FinalizeExpansion(encrypt.key1);
-          } else {
+    if (table) {
+        Log(LogLevel::Debug, "Successfully expanded continuum encryption keys.");
+        // ADD THIS:
+        for (int i = 0; i < 20; i++) {
+            Log(LogLevel::Debug, "  expanded_key[%d] = 0x%08X", i, table[i]);
+        }
+        memcpy(encrypt.expanded_key, table, sizeof(encrypt.expanded_key));
+        encrypt.FinalizeExpansion(encrypt.key1);
+    } else {
             Log(LogLevel::Error, "Failed to expand key.");
           }
         });
