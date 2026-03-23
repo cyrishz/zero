@@ -11,6 +11,7 @@
 #include "GoalieBehavior.h"
 #include "DefenderBehavior.h"
 #include "OffenseBehavior.h"
+#include "MLGoalieBehavior.h"
 
 namespace zero {
 namespace hockeyzone {
@@ -121,6 +122,7 @@ void HockeyZoneController::CreateBehaviors(const char* arena_name) {
   
   // Goalie behavior - use with: !behavior goalie
   repo.Add("goalie", std::make_unique<GoalieBehavior>()); 
+  repo.Add("goalieml", std::make_unique<MLGoalieBehavior>());
   
   // Offense behavior - use with: !behavior offense
   repo.Add("offense", std::make_unique<OffenseBehavior>());

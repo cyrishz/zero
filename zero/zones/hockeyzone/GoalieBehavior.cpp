@@ -1,22 +1,18 @@
 /*
-    ZERO BOT - GOALIE BEHAVIOR
+    ZERO BOT - GOALIE BEHAVIOR (V2.0 UNSCORABLE ARCHITECTURE)
     
     BASE BEHAVIOR FOCUS:
     - Pure Elliptical Arc mirroring
-    - Dynamic Angle Challenge (Red Line to Blue Line interpolation)
-    - True "Linix" Broadside Flight (Always faces North to allow smooth reverse South flight)
-    - True Shot Tracking (Checks if puck is unattached)
-    - Isolated Emergency Dive Mechanics (Fixes steering conflicts)
-    - Anti-Tangle Goal Line Repulsor (Global Override)
-    - Offensive Defense (Point-Blank Single Bullet Taps)
-    - Velocity Mirroring (Proactive Y-Axis Tracking)
-    - Hybrid Crease Clamp (Stays tight on carriers, full extension on shots)
+    - Dynamic Angle Challenge 
+    - Velocity Mirroring 
     
-    ELITE ADDITIONS:
-    - One-Timer Pass Anticipation (Slot Threat Scanning)
-    - True Post Sealing (Wrap-around Defense)
-    - Smart Vector Clearing (Evades pressure on clears)
-    - Momentum-Breaking Anchors (Eagerly abandons posts if threat drives to center)
+    V2.0 UPGRADES (THE INEVITABILITY UPDATE):
+    - Shot Imminent State (Pre-shot posture, reads settling players)
+    - Preloaded Kick (Micro-bursts before release, commits on shot)
+    - Intercept Lane Blending (Cuts off X/Y path, doesn't just track Y)
+    - Hard "No Goal" Wall Logic (Absolute Y-alignment enforcement)
+    - Momentum Dampening (PD Controller eliminates overshoot/jitter)
+    - Cross-Net Panic & Aggressive Slot Threat weights
 */
 
 #include "GoalieBehavior.h"
@@ -45,32 +41,30 @@ namespace GoalieConfig {
     
     constexpr float kCenterY[2] = { 511.5f, 736.0f }; 
 
-    // Full physical goalpost offset for active saves
     constexpr float kPostOffset = 13.5f;    
     
-    // --- RED LINE (Base/Retreat Arc) ---
     constexpr float kMinDepth = 2.0f;       
     constexpr float kMaxArcDepth = 7.0f;    
     
-    // --- BLUE LINE (Challenge Arc) ---
     constexpr float kChallengeMinDepth = 5.0f;       
     constexpr float kChallengeMaxArcDepth = 15.0f;   
     
-    // --- CHALLENGE TRIGGER DISTANCES ---
     constexpr float kChallengeStartDist = 35.0f;     
     constexpr float kChallengeRetreatDist = 18.0f;   
 
-    // --- DEEP CORNER ANCHORS & MOVEMENT LIMITS ---
     constexpr float kDeepCornerThreshold = 28.0f;    
     constexpr float kAnchorDepth = 3.0f;             
     
-    // Tight tactical offsets to prevent overcommitting on crossovers
-    constexpr float kNorthAnchorYOffset = -8.5f;     
-    constexpr float kSouthAnchorYOffset = 8.5f;     
+    constexpr float kNorthAnchorYOffset = -12.0f;     
+    constexpr float kSouthAnchorYOffset = 12.0f;     
     constexpr float kWrapAroundSealDepth = 1.0f;     
     
-    // --- ESCAPE VELOCITY ---
     constexpr float kDriveToCenterVelocityThreshold = 12.0f; 
+}
+
+// Vector math helper for blending
+inline Vector2f LerpVector(const Vector2f& a, const Vector2f& b, float t) {
+    return Vector2f(std::lerp(a.x, b.x, t), std::lerp(a.y, b.y, t));
 }
 
 // =============================================================================
@@ -99,27 +93,28 @@ struct GoalieDefendNode : public behavior::BehaviorNode {
         bool defend_left = (self->frequency % 2 == 0);
         float goal_line_x = defend_left ? GoalieConfig::kLeftGoalLineX : GoalieConfig::kRightGoalLineX;
         
-        // Physical bounds for goal detection and loose-puck lunging
         float top_post_y = center_y - GoalieConfig::kPostOffset;
         float bottom_post_y = center_y + GoalieConfig::kPostOffset;
 
-        // Tactical tight bounds for tracking puck carriers
         float track_top_y = center_y + GoalieConfig::kNorthAnchorYOffset;
         float track_bottom_y = center_y + GoalieConfig::kSouthAnchorYOffset;
 
-        // === GOAL DETECTOR METRICS ===
+        static int explosion_ticks = 0;
+        if (explosion_ticks > 0) explosion_ticks--;
+
+        // === TELEMETRY: GOAL DETECTOR ===
         static bool goal_scored_recently = false;
         bool puck_in_net = false;
         
-        if (defend_left && puck_pos.x < GoalieConfig::kLeftGoalLineX && puck_pos.y > top_post_y && puck_pos.y < bottom_post_y) {
+        if (defend_left && puck_pos.x < goal_line_x && puck_pos.y > top_post_y && puck_pos.y < bottom_post_y) {
             puck_in_net = true;
-        } else if (!defend_left && puck_pos.x > GoalieConfig::kRightGoalLineX && puck_pos.y > top_post_y && puck_pos.y < bottom_post_y) {
+        } else if (!defend_left && puck_pos.x > goal_line_x && puck_pos.y > top_post_y && puck_pos.y < bottom_post_y) {
             puck_in_net = true;
         }
 
         if (puck_in_net && !goal_scored_recently) {
-            Log(LogLevel::Warning, "🚨 GOAL SCORED! 🚨 | Puck:(%.1f, %.1f) | Goalie:(%.1f, %.1f)", 
-                puck_pos.x, puck_pos.y, self->position.x, self->position.y);
+            Log(LogLevel::Info, "[GoalieMetrics] 🚨 GOAL ALLOWED | Puck:(%.1f, %.1f) | Goalie:(%.1f, %.1f) | DistFromCenter: %.1f", 
+                puck_pos.x, puck_pos.y, self->position.x, self->position.y, std::abs(self->position.y - center_y));
             goal_scored_recently = true; 
         } else if (!puck_in_net && puck_pos.x > 450.0f && puck_pos.x < 574.0f) {
             goal_scored_recently = false; 
@@ -165,32 +160,72 @@ struct GoalieDefendNode : public behavior::BehaviorNode {
         
         if (puck_vel_tick.LengthSq() > 100.0f) puck_vel_tick = Vector2f(0, 0);
 
-        float prediction_time = 0.10f; 
         float predicted_y = threat_pos.y;
         float puck_speed = puck_vel_tick.Length() * 100.0f; 
+        bool heading_to_net = defend_left ? (puck_vel_tick.x < -0.001f) : (puck_vel_tick.x > 0.001f);
         
-        bool is_fast_shot = (puck_speed > 35.0f && dist_to_puck_carrier > 2.5f);
+        // V2: LIVE SHOT VS IMMINENT SHOT
+        bool is_live_shot = (dist_to_puck_carrier > 1.5f && heading_to_net && puck_speed > 15.0f);
+        
+        float threat_dist_to_center_x = std::abs(threat_pos.x - goal_line_x);
+        bool shot_imminent = (dist_to_puck_carrier < 3.0f && 
+                              threat_vel.Length() < 2.0f && 
+                              std::abs(threat_pos.y - center_y) < 25.0f && 
+                              threat_dist_to_center_x < 30.0f);
 
-        if (is_fast_shot) {
-            prediction_time = std::clamp(puck_speed / 100.0f, 0.15f, 0.40f);
-            predicted_y = puck_pos.y + (puck_vel_tick.y * 100.0f) * prediction_time;
+        // V2: PRELOAD & KICK TIMERS + CROSS-NET PANIC
+        static float last_dist_to_carrier = 0.0f;
+        static bool shot_in_progress = false;
+
+        if (is_live_shot && !shot_in_progress) {
+            float goalie_depth = std::abs(self->position.x - goal_line_x);
+            Log(LogLevel::Info, "[GoalieMetrics] 🏒 SHOT DETECTED | Puck:(%.1f, %.1f) | Vel:(%.2f, %.2f) | Goalie:(%.1f, %.1f) | Depth: %.1f", 
+                puck_pos.x, puck_pos.y, puck_vel_tick.x * 100.0f, puck_vel_tick.y * 100.0f, self->position.x, self->position.y, goalie_depth);
+            
+            shot_in_progress = true;
+            explosion_ticks = 12; // V2: Full commit explosion
+            
+        } else if (shot_imminent && explosion_ticks == 0 && !is_live_shot) {
+            explosion_ticks = 6; // V2: Preload micro-burst
+        } else if (!is_live_shot) {
+            shot_in_progress = false;
+        }
+        
+        // V2: CROSS-NET PANIC OVERRIDE
+        bool cross_net = std::abs(puck_vel_tick.y) > 2.5f && is_live_shot;
+        if (cross_net) {
+            explosion_ticks = std::max(explosion_ticks, 10);
+        }
+        
+        last_dist_to_carrier = dist_to_puck_carrier;
+
+        // V2: TRUE INTERCEPT PREDICTION + AGGRESSIVE SLOT WEIGHT
+        if (is_live_shot || shot_imminent) {
+            float velocity_to_use_x = is_live_shot ? puck_vel_tick.x : threat_vel.x;
+            float velocity_to_use_y = is_live_shot ? puck_vel_tick.y : threat_vel.y;
+            
+            if (std::abs(velocity_to_use_x) > 0.01f) {
+                float t = (goal_line_x - puck_pos.x) / velocity_to_use_x;
+                if (t > 0 && t < 150.0f) {
+                    predicted_y = puck_pos.y + velocity_to_use_y * t;
+                }
+            }
         } else {
             float threat_speed = threat_vel.Length();
-            prediction_time = std::clamp(0.10f + (threat_speed * 0.01f), 0.10f, 0.35f);
+            float prediction_time = std::clamp(0.10f + (threat_speed * 0.01f), 0.10f, 0.35f);
             predicted_y = threat_pos.y + threat_vel.y * prediction_time;
             
+            // V2: AGGRESSIVE SLOT OVERRIDE
             if (highest_slot_danger > 5.0f && dist_to_puck_carrier < 3.0f) {
-                predicted_y = std::lerp(predicted_y, secondary_threat_pos.y, 0.25f);
+                predicted_y = std::lerp(predicted_y, secondary_threat_pos.y, 0.45f); // Increased to 0.45f
             }
         }
 
         // === THE HYBRID CLAMP (THE LUNGE) ===
         float want_y;
-        if (is_fast_shot || dist_to_puck_carrier > 3.0f) {
-            // Puck is loose or shot is fired: Allow full extension to the physical posts!
+        if (is_live_shot || shot_imminent || dist_to_puck_carrier > 3.0f) {
             want_y = std::clamp(predicted_y, top_post_y, bottom_post_y);
         } else {
-            // Player is carrying: Keep it tight inside the crease bounds to prevent crossovers.
             want_y = std::clamp(predicted_y, track_top_y, track_bottom_y);
         }
 
@@ -217,7 +252,6 @@ struct GoalieDefendNode : public behavior::BehaviorNode {
         float current_max_depth = GoalieConfig::kMaxArcDepth + 
             (GoalieConfig::kChallengeMaxArcDepth - GoalieConfig::kMaxArcDepth) * challenge_factor;
 
-        // Arc calculation maintains the smooth ellipse math
         float dy = want_y - center_y;
         float arc_ratio = std::sqrt(std::max(0.0f, 1.0f - (dy * dy) / (GoalieConfig::kPostOffset * GoalieConfig::kPostOffset)));
         float depth = current_min_depth + (current_max_depth - current_min_depth) * arc_ratio;
@@ -235,32 +269,49 @@ struct GoalieDefendNode : public behavior::BehaviorNode {
         bool driving_out_of_south = (threat_pos.y > center_y && threat_vel.y < -GoalieConfig::kDriveToCenterVelocityThreshold);
         bool driving_to_center = driving_out_of_north || driving_out_of_south;
 
-        if (!is_fast_shot && !driving_to_center) {
+        if (!is_live_shot && !driving_to_center) {
             if (is_behind_net && std::abs(threat_pos.y - center_y) < GoalieConfig::kDeepCornerThreshold + 10.0f) {
                 want_x = defend_left ? (goal_line_x + GoalieConfig::kWrapAroundSealDepth) : (goal_line_x - GoalieConfig::kWrapAroundSealDepth);
-                want_y = threat_pos.y < center_y ? track_top_y : track_bottom_y; 
+                want_y = threat_pos.y < center_y ? top_post_y + 1.0f : bottom_post_y - 1.0f; 
             } 
             else if (threat_pos.y < center_y - GoalieConfig::kDeepCornerThreshold) {
                 want_x = defend_left ? (goal_line_x + GoalieConfig::kAnchorDepth) : (goal_line_x - GoalieConfig::kAnchorDepth);
-                want_y = center_y + GoalieConfig::kNorthAnchorYOffset;
+                want_y = top_post_y + 1.0f;
             } else if (threat_pos.y > center_y + GoalieConfig::kDeepCornerThreshold) {
                 want_x = defend_left ? (goal_line_x + GoalieConfig::kAnchorDepth) : (goal_line_x - GoalieConfig::kAnchorDepth);
-                want_y = center_y + GoalieConfig::kSouthAnchorYOffset;
+                want_y = bottom_post_y - 1.0f;
             }
         }
 
-        Vector2f target(want_x, want_y);
+        // V2: INTERCEPT LANE BLENDING (THE BIG UPGRADE)
+        Vector2f base_target(want_x, want_y);
+        Vector2f lane_target(goal_line_x, predicted_y); // Pure geometric blockage point
+        
+        float lane_blend = is_live_shot ? 0.65f : (shot_imminent ? 0.25f : 0.0f);
+        Vector2f target = LerpVector(base_target, lane_target, lane_blend);
+
+        // V2: HARD "NO GOAL" WALL
+        if (is_live_shot) {
+            float max_y_error = 2.5f;
+            if (std::abs(self->position.y - predicted_y) > max_y_error) {
+                target.y = predicted_y; // Absolute Y-alignment override
+            }
+        }
 
         // === FLIGHT DYNAMICS ===
         Vector2f to_target = target - self->position;
         float dist_to_target = to_target.Length();
         float y_dist_to_target = std::abs(target.y - self->position.y);
 
+        if (explosion_ticks > 0 && dist_to_target < 0.5f) {
+            explosion_ticks = 0; 
+        }
+
         bool is_moving = ctx.blackboard.ValueOr<bool>("defend_is_moving", false);
 
-        if (is_fast_shot || y_dist_to_target > 0.5f || dist_to_target > 0.8f) {
+        if (is_live_shot || shot_imminent || y_dist_to_target > 0.5f || dist_to_target > 0.8f) {
             is_moving = true;  
-        } else if (!is_fast_shot && dist_to_target < 0.2f) {
+        } else if (!is_live_shot && !shot_imminent && dist_to_target < 0.2f) {
             is_moving = false; 
         }
 
@@ -269,33 +320,40 @@ struct GoalieDefendNode : public behavior::BehaviorNode {
         bool use_ab = false;
 
         if (is_moving) {
-            use_ab = is_fast_shot && y_dist_to_target > 2.0f && self->energy > 400.0f;
+            // V2: URGENCY-BASED AB TRIGGER
+            if (is_live_shot || shot_imminent) {
+                use_ab = (y_dist_to_target > 2.0f && self->energy > 250.0f) || (explosion_ticks > 0 && self->energy > 200.0f);
+            } else {
+                use_ab = (y_dist_to_target > 5.0f && self->energy > 600.0f);
+            }
 
+            Vector2f final_force;
             if (use_ab) {
-                ctx.bot->bot_controller->steering.Face(*ctx.bot->game, target);
-                ctx.bot->bot_controller->steering.force = Normalize(to_target) * 100.0f; 
+                // V2: MOMENTUM DAMPENING (PD CONTROLLER) ON BURST
+                final_force = Normalize(to_target) * 100.0f - (self->velocity * 0.5f);
             } else {
                 float desired_speed = std::min(50.0f, dist_to_target * 5.0f);
                 Vector2f desired_velocity = Normalize(to_target) * desired_speed;
-                Vector2f force_needed = desired_velocity - self->velocity;
                 
-                if (!is_fast_shot) {
-                    force_needed.y += (threat_vel.y * 0.40f); 
-                }
+                // V2: HEAVY MOMENTUM DAMPENING ON DRIFT
+                final_force = desired_velocity - (self->velocity * 1.35f);
                 
-                // PURE SOURCE OF TRUTH FACING
-                if (force_needed.y <= 0) {
-                    ctx.bot->bot_controller->steering.Face(*ctx.bot->game, self->position + force_needed);
-                } else {
-                    ctx.bot->bot_controller->steering.Face(*ctx.bot->game, self->position - force_needed);
+                if (!is_live_shot && !shot_imminent) {
+                    final_force.y += (threat_vel.y * 0.40f); 
                 }
-                ctx.bot->bot_controller->steering.force = force_needed;
             }
+
+            if (final_force.y <= 0) {
+                ctx.bot->bot_controller->steering.Face(*ctx.bot->game, self->position + final_force);
+            } else {
+                ctx.bot->bot_controller->steering.Face(*ctx.bot->game, self->position - final_force);
+            }
+            ctx.bot->bot_controller->steering.force = final_force;
+
         } else {
             // PLANTED 
             Vector2f brake_force = -self->velocity * 4.0f; 
             
-            // PURE SOURCE OF TRUTH FACING
             if (brake_force.y <= 0) {
                 ctx.bot->bot_controller->steering.Face(*ctx.bot->game, self->position + brake_force);
             } else {
@@ -439,7 +497,6 @@ struct GoalieIdleNode : public behavior::BehaviorNode {
             Vector2f desired_velocity = Normalize(to_home) * desired_speed;
             Vector2f force_needed = desired_velocity - self->velocity;
             
-            // PURE SOURCE OF TRUTH FACING
             if (force_needed.y <= 0) {
                 ctx.bot->bot_controller->steering.Face(*ctx.bot->game, self->position + force_needed);
                 ctx.bot->bot_controller->steering.force = force_needed;

@@ -1,0 +1,7 @@
+/home/cyris/zero/CMakeFiles/zero.dir
+/home/cyris/zero/CMakeFiles/edit_cache.dir
+/home/cyris/zero/CMakeFiles/rebuild_cache.dir
+/home/cyris/zero/CMakeFiles/list_install_components.dir
+/home/cyris/zero/CMakeFiles/install.dir
+/home/cyris/zero/CMakeFiles/install/local.dir
+/home/cyris/zero/CMakeFiles/install/strip.dir

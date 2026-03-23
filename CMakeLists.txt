@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(zero VERSION 0.0.1 LANGUAGES CXX)
+project(zero VERSION 0.0.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 
@@ -34,6 +34,7 @@ include(GNUInstallDirs)
 file(GLOB_RECURSE SOURCES zero/*.cpp)
 list(APPEND SOURCES lib/glad/src/glad.cpp)
 list(APPEND SOURCES ${GLFW_SOURCES})
+list(APPEND SOURCES zero/zones/hockeyzone/brains/master_goalie.c)
 
 add_executable(zero ${SOURCES})
 if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
